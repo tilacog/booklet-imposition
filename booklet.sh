@@ -3,20 +3,24 @@
 # booklet.sh – prepare a PDF for booklet printing (single-sided workflow)
 #
 # This script takes a PDF file and transforms it into a booklet-ready format by:
-# 1. Padding the PDF to ensure page count is a multiple of 4
-# 2. Imposing the pages in booklet order using pdfbook2
+# 1. Adding bleed to pages using pdfcrop (optional)
+# 2. Padding the PDF to ensure page count is a multiple of 4
+# 3. Imposing the pages in booklet order using pdfbook2
 #
 # Dependencies:
 #   - ghostscript (gs)
+#   - pdfcrop (from texlive-extra-utils, only needed if bleed > 0)
 #   - pdfbook2 (from texlive-extra-utils)
 #
 # Usage:
-#   ./booklet.sh input.pdf [paper-size]
+#   ./booklet.sh input.pdf [paper-size] [bleed]
 #
 # Arguments:
 #   input.pdf   - Path to input PDF file
 #   paper-size  - Optional paper size (default: a4paper)
 #                 Common values: a4paper, letterpaper, a5paper
+#   bleed       - Optional bleed amount in points (default: 0)
+#                 Use positive values to add bleed (e.g., 9 for 3mm)
 #
 # Output:
 #   <input>_booklet.pdf - Final booklet-ready PDF file
@@ -35,7 +39,47 @@ check_dependency() {
     fi
 }
 
-# ---------- Step 1: Pad ----------
+# ---------- Step 1: Add Bleed ----------
+
+# Add bleed to a PDF using pdfcrop with negative margins
+#
+# Bleed is extra content area that extends beyond the final trim size,
+# ensuring no white edges appear after cutting.
+#
+# Args:
+#   $1 - input_path: Path to the input PDF file
+#   $2 - output_path: Path where the PDF with bleed will be saved
+#   $3 - bleed_amount: Bleed in points (72 points = 1 inch, ~3pt = 1mm)
+#
+add_bleed() {
+    local input_path="$1"
+    local output_path="$2"
+    local bleed_amount="$3"
+
+    if [[ "$bleed_amount" -eq 0 ]]; then
+        echo "Bleed disabled (0pt) - copying file..."
+        cp "$input_path" "$output_path"
+        return
+    fi
+
+    check_dependency "pdfcrop"
+
+    echo "Adding ${bleed_amount}pt bleed to all sides..."
+
+    # Positive margins add bleed by expanding the page
+    # pdfcrop with positive values adds space around content
+    pdfcrop --margins "$bleed_amount $bleed_amount $bleed_amount $bleed_amount" \
+            "$input_path" "$output_path" > /dev/null 2>&1
+
+    if [[ ! -f "$output_path" ]]; then
+        echo "ERROR: Failed to add bleed to PDF" >&2
+        exit 1
+    fi
+
+    echo "Bleed added: $output_path"
+}
+
+# ---------- Step 2: Pad ----------
 
 # Pad a PDF file to ensure total pages is a multiple of 4
 #
@@ -101,7 +145,7 @@ pad_pdf() {
     echo "$new_total"
 }
 
-# ---------- Step 2: Booklet impose ----------
+# ---------- Step 3: Booklet impose ----------
 
 # Transform a padded PDF into booklet format using pdfbook2
 #
@@ -129,11 +173,11 @@ impose_booklet() {
 
     if echo "$help_output" | grep -q -- "--outfile"; then
         # Modern pdfbook2: explicitly specify output file
-        pdfbook2 --short-edge --paper "$paper_size" --no-crop \
+        pdfbook2 --paper "$paper_size" --no-crop \
                  "$input_path" --outfile "$output_path"
     else
         # Legacy pdfbook2: auto-generates output filename
-        pdfbook2 --short-edge --paper "$paper_size" --no-crop "$input_path"
+        pdfbook2 --paper "$paper_size" --no-crop "$input_path"
 
         # Handle legacy pdfbook2 which writes <stem>-book.pdf
         local input_dir
@@ -161,17 +205,20 @@ impose_booklet() {
 main() {
     # Parse command-line arguments
     if [[ $# -lt 1 ]]; then
-        echo "Usage: $0 input.pdf [paper-size]" >&2
+        echo "Usage: $0 input.pdf [paper-size] [bleed]" >&2
         echo "" >&2
         echo "Arguments:" >&2
         echo "  input.pdf   - Path to input PDF file" >&2
         echo "  paper-size  - Optional paper size (default: a4paper)" >&2
         echo "                Common values: a4paper, letterpaper, a5paper" >&2
+        echo "  bleed       - Optional bleed in points (default: 0)" >&2
+        echo "                Example: 9 for ~3mm bleed" >&2
         exit 1
     fi
 
     local pdf_in="$1"
     local paper="${2:-a4paper}"
+    local bleed="${3:-0}"
 
     # Validate input file exists
     if [[ ! -f "$pdf_in" ]]; then
@@ -179,9 +226,18 @@ main() {
         exit 1
     fi
 
+    # Validate bleed is a number
+    if [[ ! "$bleed" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: Bleed must be a non-negative integer" >&2
+        exit 1
+    fi
+
     # Check for required system dependencies
     check_dependency "gs"
     check_dependency "pdfbook2"
+    if [[ "$bleed" -gt 0 ]]; then
+        check_dependency "pdfcrop"
+    fi
 
     # Generate output filenames based on input
     local pdf_dir
@@ -189,22 +245,32 @@ main() {
     pdf_dir=$(dirname "$pdf_in")
     pdf_stem=$(basename "$pdf_in" .pdf)
 
+    local bleed_pdf="${pdf_dir}/${pdf_stem}_bleed.pdf"
     local padded="${pdf_dir}/${pdf_stem}_padded.pdf"
     local booklet="${pdf_dir}/${pdf_stem}_booklet.pdf"
 
-    # Phase 1: Pad the PDF to a multiple of 4 pages
-    echo "=== Phase 1: Padding PDF ==="
+    # Phase 1: Add bleed to the PDF
+    echo "=== Phase 1: Adding bleed ==="
+    add_bleed "$pdf_in" "$bleed_pdf" "$bleed"
+    echo ""
+
+    # Phase 2: Pad the PDF to a multiple of 4 pages
+    echo "=== Phase 2: Padding PDF ==="
     local total
-    total=$(pad_pdf "$pdf_in" "$padded")
+    total=$(pad_pdf "$bleed_pdf" "$padded")
     echo "Total pages after padding: $total"
     echo ""
 
-    # Phase 2: Impose pages into booklet format
-    echo "=== Phase 2: Creating booklet ==="
+    # Phase 3: Impose pages into booklet format
+    echo "=== Phase 3: Creating booklet ==="
     impose_booklet "$padded" "$booklet" "$paper"
     echo ""
 
-    # Clean up intermediate padded file
+    # Clean up intermediate files
+    if [[ -f "$bleed_pdf" ]]; then
+        rm "$bleed_pdf"
+        echo "Cleaned up intermediate file: $bleed_pdf"
+    fi
     if [[ -f "$padded" ]]; then
         rm "$padded"
         echo "Cleaned up intermediate file: $padded"
