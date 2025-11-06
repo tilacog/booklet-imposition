@@ -4,8 +4,10 @@ booklet.py – prepare a PDF for booklet printing
 
 This script takes a PDF file and transforms it into a booklet-ready format by:
 1. Adding bleed to pages using pdfcrop (optional)
-2. Padding the PDF to ensure page count is a multiple of 4
-3. Imposing the pages in booklet order using pdfbook2
+2. Padding the PDF to ensure page count is appropriate for binding
+3. Splitting into signatures/sections (optional, for multi-signature binding)
+4. Imposing the pages in booklet order using pdfbook2
+5. Merging signatures back together (if applicable)
 
 Dependencies:
   - ghostscript (gs)
@@ -88,16 +90,17 @@ def add_bleed(input_path: str, output_path: str, bleed_amount: int) -> None:
 # ---------- Step 2: Pad ----------
 
 
-def pad_pdf(input_path: str, output_path: str) -> int:
-    """Pad a PDF file to ensure total pages is a multiple of 4.
+def pad_pdf(input_path: str, output_path: str, signature_size: int = 0) -> int:
+    """Pad a PDF file to ensure total pages is a multiple of 4 (or signature_size if specified).
 
     Booklet printing requires a page count divisible by 4 (each sheet has 4 pages
-    when folded: front-left, front-right, back-left, back-right). This function
-    adds blank pages as needed.
+    when folded: front-left, front-right, back-left, back-right). When using signatures,
+    the page count must be divisible by (signature_size * number_of_signatures).
 
     Args:
         input_path: Path to the input PDF file
         output_path: Path where the padded PDF will be saved
+        signature_size: Pages per signature (0 = treat as single booklet, pad to multiple of 4)
 
     Returns:
         Total number of pages after padding
@@ -133,8 +136,15 @@ def pad_pdf(input_path: str, output_path: str) -> int:
     total = int(total_str)
 
     # Calculate how many blank pages are needed
-    # Formula: (4 - (total % 4)) % 4 returns 0-3 blank pages needed
-    to_add = (4 - (total % 4)) % 4
+    # For signatures: pad to multiple of signature_size
+    # For single booklet: pad to multiple of 4
+    if signature_size > 0:
+        # When using signatures, each signature must have exactly signature_size pages
+        # and signature_size must be divisible by 4
+        to_add = (signature_size - (total % signature_size)) % signature_size
+    else:
+        # Formula: (4 - (total % 4)) % 4 returns 0-3 blank pages needed
+        to_add = (4 - (total % 4)) % 4
 
     print(f"Original pages: {total}")
 
@@ -176,7 +186,83 @@ def pad_pdf(input_path: str, output_path: str) -> int:
     return new_total
 
 
-# ---------- Step 3: Booklet impose ----------
+# ---------- Step 3: Split into signatures ----------
+
+
+def split_into_signatures(
+    input_path: str, output_dir: str, signature_size: int, total_pages: int
+) -> list[str]:
+    """Split a PDF into multiple signature PDFs.
+
+    Each signature will contain exactly signature_size pages.
+
+    Args:
+        input_path: Path to the input PDF file
+        output_dir: Directory where signature PDFs will be saved
+        signature_size: Number of pages per signature
+        total_pages: Total number of pages in the input PDF
+
+    Returns:
+        List of paths to the created signature PDFs
+
+    Raises:
+        SystemExit: If splitting fails
+    """
+    num_signatures = total_pages // signature_size
+
+    if total_pages % signature_size != 0:
+        print(
+            f"ERROR: Total pages ({total_pages}) is not divisible by signature size ({signature_size})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    print(f"Splitting into {num_signatures} signature(s) of {signature_size} pages each...")
+
+    signature_paths = []
+
+    for sig_num in range(num_signatures):
+        start_page = sig_num * signature_size + 1
+        end_page = start_page + signature_size - 1
+
+        output_path = os.path.join(output_dir, f"signature_{sig_num + 1:03d}.pdf")
+
+        # Use ghostscript to extract page range
+        gs_cmd = [
+            "gs",
+            "-q",
+            "-dNOPAUSE",
+            "-dBATCH",
+            "-sDEVICE=pdfwrite",
+            f"-dFirstPage={start_page}",
+            f"-dLastPage={end_page}",
+            f"-sOutputFile={output_path}",
+            input_path,
+        ]
+
+        try:
+            subprocess.run(gs_cmd, stderr=subprocess.DEVNULL, check=True)
+        except subprocess.CalledProcessError:
+            print(
+                f"ERROR: Failed to extract signature {sig_num + 1}", file=sys.stderr
+            )
+            sys.exit(1)
+
+        if not os.path.isfile(output_path):
+            print(
+                f"ERROR: Failed to create signature {sig_num + 1}", file=sys.stderr
+            )
+            sys.exit(1)
+
+        signature_paths.append(output_path)
+        print(
+            f"  Created signature {sig_num + 1}/{num_signatures}: pages {start_page}-{end_page}"
+        )
+
+    return signature_paths
+
+
+# ---------- Step 4: Booklet impose ----------
 
 
 def impose_booklet(input_path: str, output_path: str, paper_size: str) -> None:
@@ -252,6 +338,44 @@ def impose_booklet(input_path: str, output_path: str, paper_size: str) -> None:
         sys.exit(1)
 
 
+# ---------- Step 5: Merge signatures ----------
+
+
+def merge_signatures(signature_paths: list[str], output_path: str) -> None:
+    """Merge multiple imposed signature PDFs into a single PDF.
+
+    Args:
+        signature_paths: List of paths to imposed signature PDFs
+        output_path: Path where the merged PDF will be saved
+
+    Raises:
+        SystemExit: If merging fails
+    """
+    print(f"Merging {len(signature_paths)} signature(s) into final booklet...")
+
+    # Use ghostscript to merge PDFs
+    gs_cmd = [
+        "gs",
+        "-q",
+        "-dNOPAUSE",
+        "-dBATCH",
+        "-sDEVICE=pdfwrite",
+        f"-sOutputFile={output_path}",
+    ] + signature_paths
+
+    try:
+        subprocess.run(gs_cmd, stderr=subprocess.DEVNULL, check=True)
+    except subprocess.CalledProcessError:
+        print("ERROR: Failed to merge signatures", file=sys.stderr)
+        sys.exit(1)
+
+    if not os.path.isfile(output_path):
+        print("ERROR: Failed to create merged booklet", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Signatures merged: {output_path}")
+
+
 # ---------- Main ----------
 
 
@@ -266,6 +390,8 @@ Examples:
   %(prog)s input.pdf --paper letterpaper
   %(prog)s input.pdf --paper a5paper --bleed 9
   %(prog)s input.pdf -p letterpaper -b 9
+  %(prog)s input.pdf --signature 16              # 16-page signatures
+  %(prog)s input.pdf -s 32 -p a4paper            # 32-page signatures on A4
 
 Paper sizes:
   Common values include: a4paper (default), letterpaper, a5paper, legalpaper
@@ -273,6 +399,13 @@ Paper sizes:
 Bleed:
   Bleed amount in points (72 points = 1 inch, ~3 points = 1mm)
   Use positive values to add bleed around content (e.g., 9 for ~3mm bleed)
+
+Signatures:
+  A signature (or section) is a group of folded pages in bookbinding.
+  Instead of one large booklet, the PDF is split into multiple smaller
+  signatures that are then gathered and bound together.
+  Signature size must be divisible by 4. Common values: 8, 16, 32
+  Use 0 (default) to treat the entire PDF as a single booklet.
         """,
     )
 
@@ -297,6 +430,16 @@ Bleed:
         help="Bleed amount in points (default: 0, disabled)",
     )
 
+    parser.add_argument(
+        "-s",
+        "--signature",
+        dest="signature_size",
+        type=int,
+        default=0,
+        metavar="PAGES",
+        help="Pages per signature/section (default: 0, treat entire PDF as one booklet). Common values: 8, 16, 32",
+    )
+
     parser.add_argument("-v", "--version", action="version", version="%(prog)s 2.0")
 
     args = parser.parse_args()
@@ -309,6 +452,18 @@ Bleed:
     # Validate bleed is non-negative
     if args.bleed < 0:
         print("ERROR: Bleed must be a non-negative integer", file=sys.stderr)
+        sys.exit(1)
+
+    # Validate signature size
+    if args.signature_size < 0:
+        print("ERROR: Signature size must be a non-negative integer", file=sys.stderr)
+        sys.exit(1)
+
+    if args.signature_size > 0 and args.signature_size % 4 != 0:
+        print(
+            f"ERROR: Signature size ({args.signature_size}) must be divisible by 4",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     # Check for required system dependencies
@@ -331,16 +486,56 @@ Bleed:
     add_bleed(str(args.input), str(bleed_pdf), args.bleed)
     print()
 
-    # Phase 2: Pad the PDF to a multiple of 4 pages
+    # Phase 2: Pad the PDF to appropriate page count
     print("=== Phase 2: Padding PDF ===")
-    total = pad_pdf(str(bleed_pdf), str(padded_pdf))
+    total = pad_pdf(str(bleed_pdf), str(padded_pdf), args.signature_size)
     print(f"Total pages after padding: {total}")
     print()
 
-    # Phase 3: Impose pages into booklet format
-    print("=== Phase 3: Creating booklet ===")
-    impose_booklet(str(padded_pdf), str(booklet_pdf), args.paper_size)
-    print()
+    # Choose workflow based on whether signatures are requested
+    if args.signature_size > 0:
+        # Signature-based workflow
+        print(f"=== Phase 3: Splitting into signatures ({args.signature_size} pages each) ===")
+
+        # Create temporary directory for signature files
+        sig_dir = pdf_dir / f"{pdf_stem}_signatures"
+        sig_dir.mkdir(exist_ok=True)
+
+        # Split into signatures
+        signature_paths = split_into_signatures(
+            str(padded_pdf), str(sig_dir), args.signature_size, total
+        )
+        print()
+
+        # Phase 4: Impose each signature
+        print("=== Phase 4: Imposing signatures ===")
+        imposed_paths = []
+
+        for i, sig_path in enumerate(signature_paths, 1):
+            sig_filename = Path(sig_path).name
+            imposed_path = str(sig_dir / f"imposed_{sig_filename}")
+
+            print(f"Imposing signature {i}/{len(signature_paths)}...")
+            impose_booklet(sig_path, imposed_path, args.paper_size)
+
+            imposed_paths.append(imposed_path)
+
+        print()
+
+        # Phase 5: Merge imposed signatures
+        print("=== Phase 5: Merging signatures ===")
+        merge_signatures(imposed_paths, str(booklet_pdf))
+        print()
+
+        # Clean up signature files
+        print("Cleaning up signature files...")
+        shutil.rmtree(sig_dir)
+
+    else:
+        # Single booklet workflow (original behavior)
+        print("=== Phase 3: Creating booklet ===")
+        impose_booklet(str(padded_pdf), str(booklet_pdf), args.paper_size)
+        print()
 
     # Clean up intermediate files
     if bleed_pdf.exists():
@@ -355,6 +550,9 @@ Bleed:
     print()
     print("Done.")
     print(f"  Booklet: {booklet_pdf}")
+    if args.signature_size > 0:
+        num_signatures = total // args.signature_size
+        print(f"  Signatures: {num_signatures} × {args.signature_size} pages")
 
 
 if __name__ == "__main__":
