@@ -1,0 +1,21 @@
+# Rust
+/target/
+Cargo.lock
+*.pdb
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Output files (PDF intermediates)
+*_bleed.pdf
+*_padded.pdf
+*_booklet.pdf
+*_signatures/

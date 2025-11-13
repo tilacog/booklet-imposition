@@ -1,0 +1,30 @@
+[package]
+name = "booklet-imposition"
+version = "1.0.0"
+license = "MIT"
+description = "Transform PDFs into printable booklet format with optional bleed and signature support"
+repository = "https://github.com/tilacog/booklet-imposition"
+keywords = ["pdf", "booklet", "printing", "bookbinding"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "booklet"
+path = "src/main.rs"
+
+[[bin]]
+name = "signature-pages"
+path = "src/bin/signature_pages.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "cargo", "wrap_help"] }
+anyhow = "1.0"
+thiserror = "1.0"
+
+[dev-dependencies]
+tempfile = "3.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true  # Strip symbols for smaller binary
